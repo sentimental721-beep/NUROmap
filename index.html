@@ -4,23 +4,43 @@ async function showTownPoint(r){
  if(!map||!r)return;
  const seq=++pointRequest;
  if(pointMarker){map.removeLayer(pointMarker);pointMarker=null;}
- $('status').textContent='選択した町丁目の位置を検索中…';
- try{
-  const address=r.pref+r.city+r.town;
-  const url='https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=jp&q='+encodeURIComponent(address);
-  const response=await fetch(url,{headers:{'Accept':'application/json'}});
-  if(!response.ok)throw Error('位置検索サービスに接続できません');
-  const places=await response.json();if(seq!==pointRequest)return;
-  if(!places.length){$('status').textContent='町丁目の位置を取得できませんでした。住所の判定結果は表示できます。';return;}
-  const place=places[0],lat=Number(place.lat),lng=Number(place.lon);
-  if(!Number.isFinite(lat)||!Number.isFinite(lng))throw Error('位置情報が不正です');
-  pointMarker=L.circleMarker([lat,lng],{radius:12,color:'#17243b',weight:2,fillColor:colors[r.status],fillOpacity:.9}).addTo(map);
-  pointMarker.bindPopup('<strong>選択した町丁目の参考位置</strong><pre style="white-space:pre-wrap">'+esc(detail(r))+'</pre>').openPopup();
-  map.setView([lat,lng],15);
-  $('status').textContent='色付きの丸は町丁目の参考位置です。町丁目全体の範囲ではありません。';
- }catch(e){if(seq===pointRequest)$('status').textContent='位置検索に失敗しました：'+e.message;}
+ const address=r.pref+r.city+r.town;
+ const label='<strong>選択住所（参考表示）</strong><pre style="white-space:pre-wrap">'+esc(detail(r))+'</pre>';
+ // Show a visible marker immediately, but never misrepresent map center as the address location.
+ const temporary=map.getCenter();
+ pointMarker=L.circleMarker(temporary,{radius:13,color:'#17243b',weight:3,fillColor:colors[r.status],fillOpacity:.85,dashArray:'4 3'}).addTo(map);
+ pointMarker.bindPopup('<strong>住所位置を検索中</strong><p>現在の丸印は地図中心の仮表示であり、選択住所の位置ではありません。</p>'+label).openPopup();
+ $('status').textContent='町丁目の位置を検索中です。点線の丸は地図中心の仮表示で、住所の位置ではありません。';
+ const endpoints=[
+  'https://msearch.gsi.go.jp/address-search/AddressSearch?q='+encodeURIComponent(address),
+  'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=jp&q='+encodeURIComponent(address)
+ ];
+ for(let i=0;i<endpoints.length;i++){
+  try{
+   const controller=new AbortController();
+   const timer=setTimeout(()=>controller.abort(),9000);
+   let response;
+   try{response=await fetch(endpoints[i],{signal:controller.signal,headers:{Accept:'application/json'}})}finally{clearTimeout(timer)}
+   if(seq!==pointRequest)return;
+   if(!response.ok)continue;
+   const data=await response.json();
+   if(seq!==pointRequest)return;
+   let lat,lng;
+   if(i===0&&Array.isArray(data)&&data.length){const coordinates=data[0]?.geometry?.coordinates;lng=Number(coordinates?.[0]);lat=Number(coordinates?.[1]);}
+   if(i===1&&Array.isArray(data)&&data.length){lat=Number(data[0]?.lat);lng=Number(data[0]?.lon);}
+   if(!Number.isFinite(lat)||!Number.isFinite(lng)||lat<20||lat>47||lng<122||lng>154)continue;
+   pointMarker.setLatLng([lat,lng]);pointMarker.setStyle({dashArray:null});
+   pointMarker.setPopupContent('<strong>選択した町丁目の参考位置</strong><p>検索サービスが返した代表地点です。町丁目全域を示すものではありません。</p>'+label).openPopup();
+   map.setView([lat,lng],15);
+   $('status').textContent='色付きの丸は住所検索で得た参考地点です。町丁目の範囲や提供可否を保証しません。';
+   return;
+  }catch(e){if(seq!==pointRequest)return;}
+ }
+ if(seq!==pointRequest)return;
+ pointMarker.setPopupContent('<strong>住所位置を特定できませんでした</strong><p>この丸印は地図中心の仮表示です。選択住所の位置を示すものではありません。</p>'+label).openPopup();
+ $('status').textContent='住所の位置情報を取得できませんでした。点線の丸は地図中心の仮表示であり、住所位置ではありません。住所の判定は左側で確認してください。';
 }
-let currentPostal="";function setPostal(value,message){currentPostal=value||"";$("postalStatus").textContent=message|| (value?"〒"+value:"郵便番号を取得できませんでした");$("copyPostal").disabled=!currentPostal;}$("copyPostal").onclick=async()=>{if(!currentPostal)return;try{await navigator.clipboard.writeText(currentPostal);$("postalStatus").textContent="コピーしました：〒"+currentPostal}catch(e){const el=document.createElement("textarea");el.value=currentPostal;document.body.appendChild(el);el.select();const ok=document.execCommand("copy");el.remove();$("postalStatus").textContent=ok?"コピーしました：〒"+currentPostal:"コピーできませんでした。HTTPSで開いてください。"}};let postalSeq=0;function lookupPostal(address,coords){const seq=++postalSeq;setPostal("","郵便番号を検索中…");if(!window.google?.maps?.Geocoder){setPostal("","郵便番号検索はGoogleマップへの切替後に利用できます。");return}const geocoder=new google.maps.Geocoder();const request=coords?{location:coords}:{address:address,region:"JP"};geocoder.geocode(request,(results,status)=>{if(seq!==postalSeq)return;if(status!=="OK"||!results?.length){setPostal("","郵便番号を取得できませんでした");return}const codes=results.flatMap(x=>x.address_components||[]).filter(x=>x.types.includes("postal_code")).map(x=>x.long_name);const code=codes.find(x=>/^\d{3}-?\d{4}$/.test(x));setPostal(code?code.replace(/^(\d{3})(\d{4})$/,"$1-$2"):"",code?undefined:"郵便番号が見つかりません。住所の詳細を確認してください。")})}function selected(address,coords){lookupPostal(address,coords);const query=coords?coords.lat+','+coords.lng:address;$('googleLink').href='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(query);$('selectedPoint').textContent='選択地点：'+address;$('slotStatus').textContent='工事枠：外部サイトで本人が確認（保存なし）'}function search(){const q=normalize($('q').value),pref=$('pref').value;const hits=rows.filter(r=>(!pref||r.pref===pref)&&(!q||normalize(r.pref+r.city+r.town).includes(q))).slice(0,100);$('matches').innerHTML='';$('result').textContent=`該当 ${hits.length} 件表示（最大100件）。地図の位置移動には町丁目境界が必要です。`;for(const r of hits){const b=document.createElement('button');b.textContent=`${r.pref}${r.city}${r.town}｜${r.category||'注意記載なし'}`;b.onclick=()=>{$('result').textContent=detail(r);selected(r.pref+r.city+r.town);showTownPoint(r);if(googleMap){new google.maps.Geocoder().geocode({address:r.pref+r.city+r.town,region:"JP"},(results,status)=>{if(status==="OK"&&results?.length){googleMap.setCenter(results[0].geometry.location);googleMap.setZoom(15)}});}if(layer){layer.eachLayer(l=>{if(l.feature&&getRecord(l.feature.properties)===r){map.fitBounds(l.getBounds());l.openPopup()}})}};$('matches').appendChild(b)}}function field(p,keys){for(const k of keys)if(p[k]!=null)return String(p[k]);return ''}function getRecord(p){let pref=field(p,['都道府県','都道府県名','pref','prefecture','PREF_NAME','N03_001']),city=field(p,['市区町村','市区町村名','city','municipality','N03_004']),town=field(p,['町丁目','町丁字','大字・町丁目名','town','S_NAME','name','NAME']),county=field(p,['郡','N03_003']),ward=field(p,['区','N03_005']);for(const key of [pref+city+town,pref+county+city+town,pref+city+ward+town]){const r=records.get(normalize(key));if(r)return r}return null}function boundaries(data){window.lastBoundaries=data;if(googleMap){drawGoogleBoundaries(data);$('status').textContent='Googleマップに境界データを読み込みました。';return}if(layer)map.removeLayer(layer);let matched=0;layer=L.geoJSON(data,{style:f=>{let r=getRecord(f.properties||{});if(r)matched++;return {color:'#64748b',weight:.6,fillColor:colors[r?.status||'unknown'],fillOpacity:.53}},onEachFeature:(f,l)=>{const r=getRecord(f.properties||{});l.bindPopup('<pre style="white-space:pre-wrap">'+esc(detail(r))+'</pre>');l.on('click',()=>{$('result').textContent=detail(r);selected(r?r.pref+r.city+r.town:'地図上の町丁目（Excel未照合）')})}}).addTo(map);if(layer.getBounds().isValid())map.fitBounds(layer.getBounds());$('status').textContent=`境界 ${data.features.length.toLocaleString()} 件中 ${matched.toLocaleString()} 件がExcelと一致しました。未一致は灰色です。`};
+let currentPostal="";function setPostal(value,message){currentPostal=value||"";$("postalStatus").textContent=message|| (value?"〒"+value:"郵便番号を取得できませんでした");$("copyPostal").disabled=!currentPostal;}$("copyPostal").onclick=async()=>{if(!currentPostal)return;try{await navigator.clipboard.writeText(currentPostal);$("postalStatus").textContent="コピーしました：〒"+currentPostal}catch(e){const el=document.createElement("textarea");el.value=currentPostal;document.body.appendChild(el);el.select();const ok=document.execCommand("copy");el.remove();$("postalStatus").textContent=ok?"コピーしました：〒"+currentPostal:"コピーできませんでした。HTTPSで開いてください。"}};let postalSeq=0;function lookupPostal(address,coords){const seq=++postalSeq;setPostal("","郵便番号を検索中…");if(!window.google?.maps?.Geocoder){setPostal("","郵便番号検索はGoogleマップへの切替後に利用できます。");return}const geocoder=new google.maps.Geocoder();const request=coords?{location:coords}:{address:address,region:"JP"};geocoder.geocode(request,(results,status)=>{if(seq!==postalSeq)return;if(status!=="OK"||!results?.length){setPostal("","郵便番号を取得できませんでした");return}const codes=results.flatMap(x=>x.address_components||[]).filter(x=>x.types.includes("postal_code")).map(x=>x.long_name);const code=codes.find(x=>/^\d{3}-?\d{4}$/.test(x));setPostal(code?code.replace(/^(\d{3})(\d{4})$/,"$1-$2"):"",code?undefined:"郵便番号が見つかりません。住所の詳細を確認してください。")})}function selected(address,coords){lookupPostal(address,coords);const query=coords?coords.lat+','+coords.lng:address;$('googleLink').href='https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(query);$('selectedPoint').textContent='選択地点：'+address;$('slotStatus').textContent='工事枠：外部サイトで本人が確認（保存なし）'}function search(){const q=normalize($('q').value),pref=$('pref').value;const hits=rows.filter(r=>(!pref||r.pref===pref)&&(!q||normalize(r.pref+r.city+r.town).includes(q))).slice(0,100);$('matches').innerHTML='';$('result').textContent=`該当 ${hits.length} 件表示（最大100件）。町丁目を選ぶと住所位置を検索します。`;for(const r of hits){const b=document.createElement('button');b.textContent=`${r.pref}${r.city}${r.town}｜${r.category||'注意記載なし'}`;b.onclick=()=>{$('result').textContent=detail(r);selected(r.pref+r.city+r.town);showTownPoint(r);if(googleMap){new google.maps.Geocoder().geocode({address:r.pref+r.city+r.town,region:"JP"},(results,status)=>{if(status==="OK"&&results?.length){googleMap.setCenter(results[0].geometry.location);googleMap.setZoom(15)}});}if(layer){layer.eachLayer(l=>{if(l.feature&&getRecord(l.feature.properties)===r){map.fitBounds(l.getBounds());l.openPopup()}})}};$('matches').appendChild(b)}}function field(p,keys){for(const k of keys)if(p[k]!=null)return String(p[k]);return ''}function getRecord(p){let pref=field(p,['都道府県','都道府県名','pref','prefecture','PREF_NAME','N03_001']),city=field(p,['市区町村','市区町村名','city','municipality','N03_004']),town=field(p,['町丁目','町丁字','大字・町丁目名','town','S_NAME','name','NAME']),county=field(p,['郡','N03_003']),ward=field(p,['区','N03_005']);for(const key of [pref+city+town,pref+county+city+town,pref+city+ward+town]){const r=records.get(normalize(key));if(r)return r}return null}function boundaries(data){window.lastBoundaries=data;if(googleMap){drawGoogleBoundaries(data);$('status').textContent='Googleマップに境界データを読み込みました。';return}if(layer)map.removeLayer(layer);let matched=0;layer=L.geoJSON(data,{style:f=>{let r=getRecord(f.properties||{});if(r)matched++;return {color:'#64748b',weight:.6,fillColor:colors[r?.status||'unknown'],fillOpacity:.53}},onEachFeature:(f,l)=>{const r=getRecord(f.properties||{});l.bindPopup('<pre style="white-space:pre-wrap">'+esc(detail(r))+'</pre>');l.on('click',()=>{$('result').textContent=detail(r);selected(r?r.pref+r.city+r.town:'地図上の町丁目（Excel未照合）')})}}).addTo(map);if(layer.getBounds().isValid())map.fitBounds(layer.getBounds());$('status').textContent=`境界 ${data.features.length.toLocaleString()} 件中 ${matched.toLocaleString()} 件がExcelと一致しました。未一致は灰色です。`};
 let googleMap=null, googleLayer=null;
 $('gmload').onclick=()=>{
  const key=$('gmkey').value.trim();if(!key){$('status').textContent='Google Maps JavaScript APIキーを入力してください。';return}
